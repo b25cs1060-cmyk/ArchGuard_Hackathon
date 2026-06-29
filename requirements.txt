@@ -1,0 +1,11 @@
+dotenv 
+typing 
+langchain_chroma 
+langchain_core.messages 
+langchain_community
+langgraph.graph 
+langgraph.graph 
+langchain_huggingface 
+langchain_core.tools 
+langchain_text_splitters 
+langchain_anthropic
