@@ -5,9 +5,10 @@ import uvicorn
 import base64
 import os
 from dotenv import load_dotenv
+
 from parser import analyze_python_file
 from analyzer import StaticAnalyzer
-from ai_agent import run_archguard_review  # Layer 3 integration
+from ai_agent import start_review_and_ask_questions, resume_review_with_answers  
 
 load_dotenv()
 
@@ -20,7 +21,10 @@ if not GITHUB_TOKEN:
 
 class PRRequest(BaseModel):
     pr_url: str
-    developer_context: str = "Standard deployment." 
+
+class AnswerSubmitRequest(BaseModel):
+    pr_url: str
+    developer_answers: str
 
 class RollbackRequest(BaseModel):
     pr_url: str
@@ -28,25 +32,24 @@ class RollbackRequest(BaseModel):
     reason: str
 
 
-
 @app.post("/analyze-pr")
 async def analyze_pr_endpoint(request: PRRequest):
     print(f"Received URL: {request.pr_url}")
     
-
+    # 1. Parse URL
     try:
         parts = request.pr_url.rstrip('/').split('/')
         owner = parts[-4]
         repo_name = parts[-3]
-        pr_number = int(parts[-1])
+        pr_number = str(parts[-1]) # Used as thread_id for LangGraph
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid GitHub PR URL format.")
 
-
+    # 2. Fetch PR from GitHub
     g = Github(GITHUB_TOKEN)
     try:
         repo = g.get_repo(f"{owner}/{repo_name}")
-        pr = repo.get_pull(pr_number)
+        pr = repo.get_pull(int(pr_number))
         print(f"Successfully fetched PR: '{pr.title}'")
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Could not fetch PR. Error: {str(e)}")
@@ -105,27 +108,45 @@ async def analyze_pr_endpoint(request: PRRequest):
     static_analysis_results = scanner.get_results()
     print("Static Analysis complete! Passing to AI Agent...")
 
-    # 5. Layer 3: LangGraph AI & Pinecone Vector DB
+    # 5. Layer 3: Start AI Agent and Pause for Questions
     findings_for_ai = static_analysis_results.get("details", [])
-    ai_review_results = run_archguard_review(findings_for_ai, request.developer_context)
-
-    print("Full Pipeline Complete!")
-
+    ai_paused_state = start_review_and_ask_questions(findings_for_ai, thread_id=pr_number)
 
     return {
-        "status": "success", 
+        "status": "pending_human_input", 
         "pr_title": pr.title,
-        "should_rollback": ai_review_results.get("should_rollback"),
-        "overall_risk_score": ai_review_results.get("overall_risk"),
+        "questions_for_developer": ai_paused_state.get("questions", []),
         "data": {
-            "ai_review": ai_review_results,
             "static_analysis": static_analysis_results,
             "layer_1_parser": changed_python_files,
         }
     }
 
 
-#enforce rollback ka endpoint
+
+@app.post("/submit-answers")
+async def submit_answers_endpoint(request: AnswerSubmitRequest):
+    try:
+        parts = request.pr_url.rstrip('/').split('/')
+        pr_number = str(parts[-1])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid GitHub PR URL format.")
+        
+    final_ai_results = resume_review_with_answers(pr_number, request.developer_answers)
+
+    print("Full Pipeline Complete!")
+
+    return {
+        "status": "success", 
+        "should_rollback": final_ai_results.get("should_rollback"),
+        "overall_risk_score": final_ai_results.get("overall_risk"),
+        "data": {
+            "ai_review": final_ai_results
+        }
+    }
+
+
+
 @app.post("/enforce-rollback")
 async def enforce_rollback_endpoint(request: RollbackRequest):
     print(f"Initiating Rollback for: {request.pr_url}")
