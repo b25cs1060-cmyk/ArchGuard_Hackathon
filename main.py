@@ -7,7 +7,7 @@ import os
 import subprocess
 import requests
 from dotenv import load_dotenv
-
+from fastapi.middleware.cors import CORSMiddleware
 from parser import analyze_python_file
 from analyzer import StaticAnalyzer
 from ai_agent import start_review_and_ask_questions, resume_review_with_answers  
@@ -15,6 +15,14 @@ from ai_agent import start_review_and_ask_questions, resume_review_with_answers
 load_dotenv()
 
 app = FastAPI(title="ArchGuard API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 if not GITHUB_TOKEN:
