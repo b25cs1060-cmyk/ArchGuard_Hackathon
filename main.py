@@ -4,6 +4,8 @@ from github import Github
 import uvicorn
 import base64
 import os
+import subprocess
+import requests
 from dotenv import load_dotenv
 
 from parser import analyze_python_file
@@ -18,6 +20,8 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 if not GITHUB_TOKEN:
     raise ValueError("GITHUB_TOKEN not found! Please check your .env file.")
 
+REPO_PATH = os.getcwd()
+
 
 class PRRequest(BaseModel):
     pr_url: str
@@ -31,21 +35,92 @@ class RollbackRequest(BaseModel):
     risk_score: float
     reason: str
 
+#github helper fns
+
+def merge_request(owner: str, repo: str, pull_number: int, github_token: str):
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pull_number}/merge"
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {github_token}", "X-GitHub-Api-Version": "2026-03-10"}
+    response = requests.put(url, headers=headers, json={"merge_method": "merge"})
+    if response.status_code != 200: raise HTTPException(status_code=response.status_code, detail=response.json())
+    return response.json()["message"]
+
+def check_pull_request(owner: str, repo: str, pull_number: int, github_token: str):
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pull_number}/merge"
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {github_token}", "X-GitHub-Api-Version": "2026-03-10"}
+    response = requests.get(url, headers=headers)
+    return response.status_code == 204 # True if merged
+
+def create_pull_request(owner: str, repo: str, head: str, base: str, github_token: str, title: str, body: str):
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {github_token}", "X-GitHub-Api-Version": "2026-03-10"}
+    response = requests.post(url, headers=headers, json={"title": title, "head": head, "base": base, "body": body})
+    if response.status_code != 201: raise HTTPException(status_code=response.status_code, detail=response.json())
+    return response.json()
+
+def create_branch(owner: str, repo: str, branch_name: str, sha: str, github_token: str):
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/refs"
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {github_token}", "X-GitHub-Api-Version": "2026-03-10"}
+    response = requests.post(url, headers=headers, json={"ref": f"refs/heads/{branch_name}", "sha": sha})
+    return response.json()
+
+def close_pull_request(owner, repo, pull_number, github_token, risk_score, reason):
+    g = Github(github_token)
+    repo_obj = g.get_repo(f"{owner}/{repo}")
+    pr = repo_obj.get_pull(pull_number)
+    
+
+    comment_body = f"""
+# ArchGuard Automated Rollback
+**Risk Score:** {risk_score} / 10.0
+
+This Pull Request has been automatically closed by ArchGuard due to critical architectural or security vulnerabilities. 
+
+**AI Diagnostics:**
+{reason}
+
+*Please resolve these issues locally and open a new Pull Request.*
+"""
+    pr.create_issue_comment(comment_body)
+    pr.edit(state="closed")
+    print(f"PR {pull_number} successfully closed and commented.")
+    return {"message": "PR closed and commented"}
+
+
+def handle_post_merge(owner, repo, repo_path, github_token, old_ref, base_branch):
+    stable_sha = subprocess.run(["git", "rev-parse", old_ref], cwd=repo_path, check=True, capture_output=True, text=True).stdout.strip()
+    branch_name = f"rollback-to-stable-{stable_sha[:7]}"
+    create_branch(owner, repo, branch_name, stable_sha, github_token)
+    return create_pull_request(owner, repo, branch_name, base_branch, github_token, "Automated Rollback", f"Reverting to {stable_sha[:7]}")
+
+def take_decision(should_rollback, owner, repo, pull_number, github_token, risk_score, reason, base_branch="main"):
+    if should_rollback:
+        is_merged = check_pull_request(owner, repo, pull_number, github_token)
+        
+        if is_merged:
+
+            return handle_post_merge(owner, repo, REPO_PATH, github_token, "HEAD~1", base_branch)
+        else:
+
+            return close_pull_request(owner, repo, pull_number, github_token, risk_score, reason)
+    else:
+        return merge_request(owner, repo, pull_number, github_token)
+    
+
 
 @app.post("/analyze-pr")
 async def analyze_pr_endpoint(request: PRRequest):
     print(f"Received URL: {request.pr_url}")
     
-    # 1. Parse URL
+
     try:
         parts = request.pr_url.rstrip('/').split('/')
         owner = parts[-4]
         repo_name = parts[-3]
-        pr_number = str(parts[-1]) # Used as thread_id for LangGraph
+        pr_number = str(parts[-1])
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid GitHub PR URL format.")
 
-    # 2. Fetch PR from GitHub
+
     g = Github(GITHUB_TOKEN)
     try:
         repo = g.get_repo(f"{owner}/{repo_name}")
@@ -56,7 +131,7 @@ async def analyze_pr_endpoint(request: PRRequest):
 
     print("Extracting and Parsing files...")
 
-    # 3. Layer 0 & 1: Extract and AST Parse
+
     changed_python_files = {}
     for file in pr.get_files():
         if file.filename.endswith(".py"):
@@ -72,7 +147,6 @@ async def analyze_pr_endpoint(request: PRRequest):
             parsed_data = analyze_python_file(full_text, patch_text)
             changed_python_files[file.filename] = parsed_data
 
-    # Infrastructure Files Extraction
     infra_files = {}
     target_files = [
         "Dockerfile", "docker-compose.yml", "requirements.txt",
@@ -88,7 +162,7 @@ async def analyze_pr_endpoint(request: PRRequest):
         except Exception:
             pass
 
-    # 4. Layer 2: Static Analysis Scanner
+
     print("Running Static Analysis Engine...")
     scanner = StaticAnalyzer()
     all_python_text = ""
@@ -126,12 +200,18 @@ async def analyze_pr_endpoint(request: PRRequest):
 
 @app.post("/submit-answers")
 async def submit_answers_endpoint(request: AnswerSubmitRequest):
+
     try:
-        parts = request.pr_url.rstrip('/').split('/')
-        pr_number = str(parts[-1])
+
+        clean_url = request.pr_url.rstrip('/')
+        parts = clean_url.split('/')
+        pr_number = parts[-1]
+        
+        print(f"DEBUG: Extracted PR Number: {pr_number}")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid GitHub PR URL format.")
         
+
     final_ai_results = resume_review_with_answers(pr_number, request.developer_answers)
 
     print("Full Pipeline Complete!")
@@ -149,41 +229,20 @@ async def submit_answers_endpoint(request: AnswerSubmitRequest):
 
 @app.post("/enforce-rollback")
 async def enforce_rollback_endpoint(request: RollbackRequest):
-    print(f"Initiating Rollback for: {request.pr_url}")
+    parts = request.pr_url.rstrip('/').split('/')
+    owner, repo, pull_number = parts[-4], parts[-3], int(parts[-1])
+
+    result = take_decision(
+        should_rollback=True, 
+        owner=owner, 
+        repo=repo, 
+        pull_number=pull_number, 
+        github_token=GITHUB_TOKEN,
+        risk_score=request.risk_score,
+        reason=request.reason
+    )
     
-    try:
-        parts = request.pr_url.rstrip('/').split('/')
-        owner = parts[-4]
-        repo_name = parts[-3]
-        pr_number = int(parts[-1])
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid GitHub PR URL.")
-
-    g = Github(GITHUB_TOKEN)
-    
-    try:
-        repo = g.get_repo(f"{owner}/{repo_name}")
-        pr = repo.get_pull(pr_number)
-        
-        comment_body = f"""
-# ArchGuard Automated Rollback
-**Risk Score:** {request.risk_score} / 10.0
-
-This Pull Request has been automatically closed by ArchGuard due to critical architectural or security vulnerabilities. 
-
-**AI Diagnostics:**
-{request.reason}
-
-*Please resolve these issues locally and open a new Pull Request.*
-"""
-        pr.create_issue_comment(comment_body)
-        pr.edit(state="closed")
-        
-        print(f"PR {pr_number} successfully closed.")
-        return {"status": "success", "message": f"PR {pr_number} closed and commented."}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to rollback. Error: {str(e)}")
+    return {"status": "success", "action_taken": result}
 
 
 if __name__ == "__main__":
