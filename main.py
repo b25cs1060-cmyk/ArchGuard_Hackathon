@@ -17,7 +17,11 @@ app = FastAPI(title="ArchGuard API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://arch-guard-hackathon.vercel.app"],
+    allow_origins=[
+        "https://arch-guard-hackathon.vercel.app",
+        "http://localhost:5173", 
+        "http://127.0.0.1:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,7 +45,6 @@ class RollbackRequest(BaseModel):
     reason: str
 
 
-# ─── GitHub Helper Functions ───────────────────────────────────────────────────
 
 def merge_request(owner: str, repo: str, pull_number: int, github_token: str):
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pull_number}/merge"
@@ -144,23 +147,54 @@ def get_pre_merge_sha(owner: str, repo: str, pull_number: int, github_token: str
 def handle_post_merge(owner: str, repo: str, pull_number: int,
                        github_token: str, base_branch: str = "main"):
     """
-    Called when the risky PR has already been merged into main.
-    1. Gets the exact commit SHA that main was at BEFORE the merge (via PR base SHA)
-    2. Creates a new rollback branch pointing at that safe commit
-    3. Opens a PR to merge that rollback branch back into main
-    The human then reviews and merges the PR to complete the rollback.
+    1. Gets the exact commit SHA that main was at BEFORE the merge.
+    2. Gets the current HEAD of main.
+    3. Creates a new branch off CURRENT main.
+    4. Creates a new commit that forces the file tree to look exactly like the old stable state.
+    5. Opens a PR to merge this revert commit safely into main.
     """
-    stable_sha = get_pre_merge_sha(owner, repo, pull_number, github_token)
-    branch_name = f"rollback-to-stable-{stable_sha[:7]}"
+    import time
+    
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {github_token}",
+        "X-GitHub-Api-Version": "2026-03-10"
+    }
 
-    create_branch(owner, repo, branch_name, stable_sha, github_token)
+    stable_sha = get_pre_merge_sha(owner, repo, pull_number, github_token)
+
+    url_main = f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{base_branch}"
+    res_main = requests.get(url_main, headers=headers).json()
+    
+    if "object" not in res_main:
+        raise HTTPException(status_code=500, detail="Failed to fetch current main HEAD.")
+    main_sha = res_main["object"]["sha"]
+
+    branch_name = f"archguard-revert-{int(time.time())}"
+    create_branch(owner, repo, branch_name, main_sha, github_token)
+
+    url_stable_commit = f"https://api.github.com/repos/{owner}/{repo}/git/commits/{stable_sha}"
+    res_stable = requests.get(url_stable_commit, headers=headers).json()
+    stable_tree_sha = res_stable["tree"]["sha"]
+
+    url_create_commit = f"https://api.github.com/repos/{owner}/{repo}/git/commits"
+    commit_payload = {
+        "message": f"Automated Rollback: Reverting to stable state {stable_sha[:7]}",
+        "tree": stable_tree_sha,
+        "parents": [main_sha]
+    }
+    res_new_commit = requests.post(url_create_commit, headers=headers, json=commit_payload).json()
+    new_commit_sha = res_new_commit["sha"]
+
+    url_update_ref = f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{branch_name}"
+    requests.patch(url_update_ref, headers=headers, json={"sha": new_commit_sha})
 
     return create_pull_request(
         owner, repo, branch_name, base_branch, github_token,
-        title=" Automated Rollback: Risk threshold exceeded",
-        body=f"This PR reverts `{base_branch}` to commit `{stable_sha[:7]}` — "
-             f"the exact state of main before the risky PR was merged.\n\n"
-             f"Review and merge this PR to complete the rollback."
+        title=f"Automated Rollback: Critical Risk Detected in PR #{pull_number}",
+        body=f"ArchGuard detected severe architectural risks after this code was merged.\n\n"
+             f"This PR safely reverts the codebase to the last known stable state (`{stable_sha[:7]}`). "
+             f"Review and merge immediately to contain the blast radius."
     )
 
 
@@ -180,7 +214,6 @@ def take_decision(should_rollback: bool, owner: str, repo: str, pull_number: int
         return merge_request(owner, repo, pull_number, github_token)
 
 
-# ─── API Endpoints ─────────────────────────────────────────────────────────────
 
 @app.post("/analyze-pr")
 async def analyze_pr_endpoint(request: PRRequest):
