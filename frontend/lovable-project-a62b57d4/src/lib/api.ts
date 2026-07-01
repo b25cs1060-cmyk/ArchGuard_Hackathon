@@ -1,5 +1,5 @@
 // Hardcoded to guarantee a connection for your local demo
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:8000";
 
 export const analyzePR = async (prUrl: string) => {
   const response = await fetch(`${API_BASE_URL}/analyze-pr`, {
