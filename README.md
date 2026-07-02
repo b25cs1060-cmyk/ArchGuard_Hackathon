@@ -8,7 +8,8 @@
 **ArchGuard** is an intelligent, cognitive code safety pipeline. It moves beyond standard syntax linting to detect structural anti-patterns, calculate the potential blast radius of a Pull Request, and orchestrate automated, programmatic rollbacks to protect production environments.
 
 
-![Uploading Gemini_Generated_Image_ia87ldia87ldia87.png…]()
+<img width="2816" height="1536" alt="Gemini_Generated_Image_ia87ldia87ldia87" src="https://github.com/user-attachments/assets/9dc0268d-7ba3-4412-8ed7-c248d81d4e29" />
+
 
 
 **Live Demo:** [arch-guard-hackathon.vercel.app](https://arch-guard-hackathon.vercel.app)
