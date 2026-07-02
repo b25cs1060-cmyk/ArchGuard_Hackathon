@@ -35,7 +35,7 @@ try:
         index_name=index_name,
         embedding=embeddings
     )
-    # Configure it to return the top 3 most relevant historical logs
+
     retriever = vector_store.as_retriever(search_kwargs={"k": 3})
     db_available = True
     print("AI Agent connected to Pinecone Cloud!")

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 from parser import analyze_python_file
 from analyzer import StaticAnalyzer
+import time
 from ai_agent import start_review_and_ask_questions, resume_review_with_answers
 
 load_dotenv()
@@ -153,7 +154,7 @@ def handle_post_merge(owner: str, repo: str, pull_number: int,
     4. Creates a new commit that forces the file tree to look exactly like the old stable state.
     5. Opens a PR to merge this revert commit safely into main.
     """
-    import time
+
     
     headers = {
         "Accept": "application/vnd.github+json",
@@ -204,13 +205,10 @@ def take_decision(should_rollback: bool, owner: str, repo: str, pull_number: int
         is_merged = check_pull_request(owner, repo, pull_number, github_token)
 
         if is_merged:
-            # PR already merged → create rollback branch + open PR to revert main
             return handle_post_merge(owner, repo, pull_number, github_token, base_branch)
         else:
-            # PR not yet merged → close it with a comment explaining why
             return close_pull_request(owner, repo, pull_number, github_token, risk_score, reason)
     else:
-        # Risk is acceptable → merge the PR
         return merge_request(owner, repo, pull_number, github_token)
 
 
